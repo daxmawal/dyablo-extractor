@@ -1,86 +1,98 @@
+#include <iostream>
+
+#include "clang/AST/AST.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
-#include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace clang::tooling;
 using namespace clang::ast_matchers;
 
-static llvm::cl::OptionCategory ToolCategory("extract-func options");
-
-class ExtractorCallback : public MatchFinder::MatchCallback {
+class MyDependencyCollector
+    : public RecursiveASTVisitor<MyDependencyCollector> {
  public:
-  ExtractorCallback(Rewriter& R) : TheRewriter(R) {}
+  explicit MyDependencyCollector(ASTContext* Context) : Context(Context) {}
 
+  bool VisitDeclRefExpr(DeclRefExpr* DRE)
+  {
+    if (const FunctionDecl* FD = dyn_cast<FunctionDecl>(DRE->getDecl())) {
+      if (FD->getBuiltinID() == 0 && FD->hasBody()) {
+        Dependencies.insert(FD);
+      }
+    }
+    if (const VarDecl* VD = dyn_cast<VarDecl>(DRE->getDecl())) {
+      if (VD->hasGlobalStorage()) {
+        Dependencies.insert(VD);
+      }
+    }
+    return true;
+  }
+
+  bool VisitCXXRecordDecl(CXXRecordDecl* CRD)
+  {
+    if (CRD->isThisDeclarationADefinition()) {
+      Dependencies.insert(CRD);
+    }
+    return true;
+  }
+
+  std::set<const Decl*> getDependencies() const { return Dependencies; }
+
+ private:
+  ASTContext* Context;
+  std::set<const Decl*> Dependencies;
+};
+
+class FunctionPrinter : public MatchFinder::MatchCallback {
+ public:
   void run(const MatchFinder::MatchResult& Result) override
   {
     if (const FunctionDecl* FD =
             Result.Nodes.getNodeAs<FunctionDecl>("targetFunc")) {
       if (FD->hasBody()) {
-        SourceManager& SM = *Result.SourceManager;
-        const LangOptions& LangOpts = Result.Context->getLangOpts();
+        llvm::outs() << "=== Function ===\n";
+        FD->print(llvm::outs());
 
-        SourceRange Range = FD->getSourceRange();
-        CharSourceRange CharRange = CharSourceRange::getTokenRange(Range);
-        std::string FuncText =
-            Lexer::getSourceText(CharRange, SM, LangOpts).str();
+        MyDependencyCollector Collector(Result.Context);
+        Collector.TraverseDecl(const_cast<FunctionDecl*>(FD));
 
-        llvm::errs() << "Extracting:\n" << FuncText << "\n";
-
-        std::error_code EC;
-        llvm::raw_fd_ostream Out("extracted.cpp", EC, llvm::sys::fs::OF_Text);
-        if (EC) {
-          llvm::errs() << "Could not open output file: " << EC.message()
-                       << "\n";
-          return;
+        for (const Decl* D : Collector.getDependencies()) {
+          llvm::outs() << "\n=== Dependency ===\n";
+          D->print(llvm::outs());
         }
 
-        Out << FuncText << "\n";
-        Out.close();
+        std::cout << "\n";
       }
     }
   }
-
- private:
-  Rewriter& TheRewriter;
 };
 
-class ExtractorAction : public ASTFrontendAction {
- public:
-  void EndSourceFileAction() override {}
-
-  std::unique_ptr<ASTConsumer> CreateASTConsumer(
-      CompilerInstance& CI, StringRef InFile) override
-  {
-    TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    Finder.addMatcher(
-        functionDecl(hasName("my_kernel")).bind("targetFunc"),
-        new ExtractorCallback(TheRewriter));
-    return Finder.newASTConsumer();
-  }
-
- private:
-  Rewriter TheRewriter;
-  MatchFinder Finder;
-};
 
 int
 main(int argc, const char** argv)
 {
+  llvm::cl::OptionCategory ToolCategory("function-extractor");
+
   auto ExpectedParser = CommonOptionsParser::create(argc, argv, ToolCategory);
   if (!ExpectedParser) {
-    llvm::errs() << ExpectedParser.takeError();
+    llvm::errs() << "Error while parsing command-line arguments: "
+                 << llvm::toString(ExpectedParser.takeError()) << "\n";
     return 1;
   }
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
+
   ClangTool Tool(
       OptionsParser.getCompilations(), OptionsParser.getSourcePathList());
 
-  return Tool.run(newFrontendActionFactory<ExtractorAction>().get());
+  FunctionPrinter Printer;
+  MatchFinder Finder;
+  Finder.addMatcher(
+      functionDecl(hasName("say_hello")).bind("targetFunc"), &Printer);
+
+  return Tool.run(newFrontendActionFactory(&Finder).get());
 }

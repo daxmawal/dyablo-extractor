@@ -1,35 +1,41 @@
-#include <cmath>
-#include <iostream>
-#include <vector>
+#include <stdio.h>
 
-const float PI = 3.14159f;
+#include <Kokkos_Core.hpp>
 
-struct Data {
-  std::vector<float> values;
-  int scale;
-};
 
-float
-scale_value(float x, int scale)
+int
+plus(int x, int y)
 {
-  return x * std::pow(2, scale);
+  return x + y;
 }
 
 void
-print_data(const Data& d)
+say_hello(void)
 {
-  for (float v : d.values) {
-    std::cout << "val: " << v << "\n";
-  }
+  printf("Hello from CPU!\n");
+
+  int x = plus(1, 2);
+
+  Kokkos::parallel_for(
+      "PrintHello", 10,
+      KOKKOS_LAMBDA(int) { printf("Hello from GPU (if enabled)!\n"); });
 }
 
-void
-my_kernel(const Data& d)
+int
+deux_plus_deux(void)
 {
-  std::cout << "Running kernel...\n";
-  for (float v : d.values) {
-    float r = scale_value(v, d.scale);
-    std::cout << "scaled: " << r << "\n";
-  }
-  print_data(d);
+  int x = plus(2, 2);
+  return x;
+}
+
+int
+main(void)
+{
+  Kokkos::initialize();
+
+  say_hello();
+  int x = deux_plus_deux();
+
+  Kokkos::finalize();
+  return 0;
 }

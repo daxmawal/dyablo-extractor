@@ -8,6 +8,7 @@
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/Support/Path.h"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -22,12 +23,28 @@ class MyDependencyCollector
   {
     if (const FunctionDecl* FD = dyn_cast<FunctionDecl>(DRE->getDecl())) {
       if (FD->getBuiltinID() == 0 && FD->hasBody()) {
-        Dependencies.insert(FD);
+        SourceManager& SM = Context->getSourceManager();
+        if (SM.isWrittenInMainFile(FD->getLocation())) {
+          Dependencies.insert(FD);
+        } else {
+          std::string File =
+              llvm::sys::path::filename(SM.getFilename(FD->getLocation()))
+                  .str();
+          HeaderIncludes.insert(File);
+        }
       }
     }
     if (const VarDecl* VD = dyn_cast<VarDecl>(DRE->getDecl())) {
       if (VD->hasGlobalStorage()) {
-        Dependencies.insert(VD);
+        SourceManager& SM = Context->getSourceManager();
+        if (SM.isWrittenInMainFile(VD->getLocation())) {
+          Dependencies.insert(VD);
+        } else {
+          std::string File =
+              llvm::sys::path::filename(SM.getFilename(VD->getLocation()))
+                  .str();
+          HeaderIncludes.insert(File);
+        }
       }
     }
     return true;
@@ -36,16 +53,25 @@ class MyDependencyCollector
   bool VisitCXXRecordDecl(CXXRecordDecl* CRD)
   {
     if (CRD->isThisDeclarationADefinition()) {
-      Dependencies.insert(CRD);
+      SourceManager& SM = Context->getSourceManager();
+      if (SM.isWrittenInMainFile(CRD->getLocation())) {
+        Dependencies.insert(CRD);
+      } else {
+        std::string File =
+            llvm::sys::path::filename(SM.getFilename(CRD->getLocation())).str();
+        HeaderIncludes.insert(File);
+      }
     }
     return true;
   }
 
   std::set<const Decl*> getDependencies() const { return Dependencies; }
+  std::set<std::string> getHeaderIncludes() const { return HeaderIncludes; }
 
  private:
   ASTContext* Context;
   std::set<const Decl*> Dependencies;
+  std::set<std::string> HeaderIncludes;
 };
 
 class FunctionPrinter : public MatchFinder::MatchCallback {
@@ -55,18 +81,41 @@ class FunctionPrinter : public MatchFinder::MatchCallback {
     if (const FunctionDecl* FD =
             Result.Nodes.getNodeAs<FunctionDecl>("targetFunc")) {
       if (FD->hasBody()) {
-        llvm::outs() << "=== Function ===\n";
-        FD->print(llvm::outs());
-
         MyDependencyCollector Collector(Result.Context);
         Collector.TraverseDecl(const_cast<FunctionDecl*>(FD));
 
-        for (const Decl* D : Collector.getDependencies()) {
-          llvm::outs() << "\n=== Dependency ===\n";
-          D->print(llvm::outs());
+        std::string IncludesBuffer;
+        std::string DepsBuffer;
+        std::string FuncBuffer;
+
+        llvm::raw_string_ostream IncludesStream(IncludesBuffer);
+        llvm::raw_string_ostream DepsStream(DepsBuffer);
+        llvm::raw_string_ostream FuncStream(FuncBuffer);
+
+        // Collect includes
+        for (const std::string& H : Collector.getHeaderIncludes()) {
+          IncludesStream << "#include <" << H << ">\n";
         }
 
-        std::cout << "\n";
+        // Collect dependencies
+        for (const Decl* D : Collector.getDependencies()) {
+          DepsStream << "\n=== Dependency ===\n";
+          D->print(DepsStream);
+        }
+
+        // Collect the main function
+        FuncStream << "\n=== Function ===\n";
+        FD->print(FuncStream);
+
+        // Flush all buffers
+        IncludesStream.flush();
+        DepsStream.flush();
+        FuncStream.flush();
+
+        // Print in the desired order
+        llvm::outs() << IncludesBuffer;
+        llvm::outs() << DepsBuffer;
+        llvm::outs() << FuncBuffer;
       }
     }
   }
